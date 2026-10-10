@@ -1,39 +1,53 @@
-# Postmortem — DR Drill Lab 23 (TEMPLATE)
+# Postmortem - DR Drill Lab 23
 
-Theo đúng template §4 "Sau Failover: Blameless Postmortem". Blameless: câu hỏi là
-"hệ thống/process nào cho phép chuyện này", không phải "ai làm sai".
+This was a controlled local drill. The goal is to improve the system, not assign
+blame. Timestamps and counts below come from the recorded run.
 
-## 1. Timeline (mọi dòng phải có evidence path:line)
+## 1. Timeline
 
-| ISO time | Sự kiện | Evidence |
+| Time (UTC) | Event | Evidence |
 |---|---|---|
-| | outage bắt đầu | |
-| | user đầu tiên bị ảnh hưởng | |
-| | health check alert | |
-| | operator confirm cutover | |
-| | resolved (request đầu tiên OK từ region phụ) | |
+| 2026-10-10T12:17:35 | Region A stopped; Region B was alive | `chaos/chaos-events.jsonl:2` |
+| 2026-10-10T12:17:36 | First failed user request after the outage | `reports/drill-2-withdr.jsonl:3` |
+| 2026-10-10T12:17:36 | Health checker marked Region A unhealthy | `reports/health-events.jsonl:2` |
+| 2026-10-10T12:17:38 | Operator-confirmed runbook started failover | `reports/runbook-run.jsonl:2` |
+| 2026-10-10T12:17:38 | Snapshot restore completed; RPO recorded | `reports/failover-events.jsonl:2` |
+| 2026-10-10T12:17:39 | Region B became ready | `reports/failover-events.jsonl:4` |
+| 2026-10-10T12:17:39 | DNS cutover completed | `reports/failover-events.jsonl:5` |
+| 2026-10-10T12:17:41 | First successful inference request from Region B | `reports/drill-2-withdr.jsonl:6` |
 
-## 2. RTO/RPO đo được vs mục tiêu — gap ở bước nào?
+## 2. RTO/RPO and gap analysis against target
 
-- RTO mục tiêu: 300s · đo được: `__s` · gap: `__s`
-- RPO mục tiêu: 300s · đo được: `__s` (`__` doc bị mất) · gap: `__s`
-- **Bước tốn nhiều giây nhất:** `____` — vì sao?
+- RTO target: 300s; measured RTO: 5.8s; gap to target: 294.2s below the limit.
+- RPO target: 300s; measured RPO: 7.21s; 10 documents were absent from the restored snapshot (gap to target: 292.79s below the limit).
+- The longest failover stage was target readiness, including 1.094s of pool warm-up.
+- Evidence summary: `reports/measure-drill-2.json`.
 
-## 3. Root cause (5 whys)
+## 3. Root cause (five whys)
 
-Không phải "vì tôi chạy chaos script". Câu hỏi: *nếu đây là outage thật, bước nào
-trong runbook của tôi sẽ thất bại?*
+1. Inference requests failed because Region A stopped serving.
+2. The edge continued routing to A until the automated failover completed.
+3. Region B could not serve immediately because its data, model weights, and pool
+   needed restore and warm-up.
+4. The snapshot was behind the primary because replication was not continuous.
+5. The runbook therefore depends on monitored replication cadence and a measured,
+   ready-before-cutover sequence; shortening detection alone would not remove the
+   restore and warm-up portions of RTO.
 
-## 4. Action items (có owner + deadline)
+## 4. Action items
 
-| # | Action | Owner | Deadline | Giảm RTO/RPO bao nhiêu giây |
+| # | Action | Owner | Deadline | Expected impact |
 |---|---|---|---|---|
-| 1 | | | | |
-| 2 | | | | |
+| 1 | Alert on replication age and snapshot failures; rehearse recovery monthly | Storage on-call | 2026-11-10 | Reduce the chance of an unbounded RPO |
+| 2 | Measure ready-pool warm-up at production load and tune the warm standby size | Serving on-call | 2026-11-10 | Reduce or better predict the 1.1s pool stage |
 
-## 5. Ba câu hỏi bắt buộc trả lời
+## 5. Required questions
 
-1. `interval × threshold` của bạn là bao nhiêu giây? Nó chiếm bao nhiêu % RTO?
-2. Nếu hạ interval xuống 1s, RTO giảm mấy giây — và bạn trả giá gì (§4 flapping)?
-3. Nếu outage kéo dài 6 giờ và region chính mất dữ liệu vĩnh viễn, `docs_lost` của
-   bạn có nghĩa gì với khách hàng?
+1. The configured detection floor is `0.2s x 2 = 0.4s`; this is 0.13% of the
+   300s target. The observed detection delay was 1.2s.
+2. A 1s polling interval could lower the theoretical floor, but polling more
+   frequently increases probe load and can make transient failures/flapping more
+   likely. Keep the consecutive-failure threshold and validate under load.
+3. If the primary region is permanently lost, `docs_lost=10` means ten customer
+   documents committed after the restored snapshot are unavailable and may need
+   reconstruction or customer communication.

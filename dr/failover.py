@@ -24,6 +24,7 @@ import json
 import pathlib
 import sys
 import time
+from datetime import datetime, timezone
 
 import httpx
 
@@ -35,13 +36,118 @@ LOG = pathlib.Path("reports/failover-events.jsonl")
 
 
 def emit(**kw):
-    """TODO: append 1 dòng JSONL có ts + iso vào LOG, và print ra stdout."""
-    raise NotImplementedError
+    """Append and print one JSONL record with epoch and UTC timestamps."""
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    record = {
+        "ts": now,
+        "iso": datetime.fromtimestamp(now, timezone.utc).isoformat(),
+        **kw,
+    }
+    with LOG.open("a", encoding="utf-8") as log:
+        log.write(json.dumps(record) + "\n")
+    print("FAILOVER", json.dumps(record))
+    return record
+
+
+def state_of(region: str) -> dict:
+    try:
+        response = httpx.get(f"{URL[region]}/v1/state", timeout=2.0)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPError as exc:
+        return {"region": region, "error": f"{type(exc).__name__}: {exc}"}
 
 
 def failover(target: str, backend: str, wait: float) -> dict:
-    """TODO: 5 bước ở trên, đúng thứ tự."""
-    raise NotImplementedError
+    """Restore, warm, and cut over only after the target reports ready."""
+    if target not in URL:
+        raise ValueError(f"unknown target region: {target}")
+    if backend not in {"fs", "minio"}:
+        raise ValueError(f"unknown snapshot backend: {backend}")
+    if wait < 0:
+        raise ValueError("wait must not be negative")
+
+    emit(step="1_verify_target", target=target, state=state_of(target))
+
+    restored = snapshot.get(target, backend)
+    primary = restored.get("source_region", "a")
+    if primary == target:
+        primary = "a" if target == "b" else "b"
+    rpo = snapshot.rpo(
+        pathlib.Path(f"state/region-{primary}/vectors.sqlite"),
+        pathlib.Path(f"state/region-{target}/vectors.sqlite"),
+    )
+    emit(
+        step="2_restore_snapshot",
+        target=target,
+        **restored,
+        **rpo,
+    )
+
+    pool_file = pathlib.Path(f"state/region-{target}/pool_state")
+    pool_file.parent.mkdir(parents=True, exist_ok=True)
+    pool_file.write_text("full\n", encoding="utf-8")
+    emit(step="3_scale_pool", target=target, pool_state="full")
+
+    started = time.monotonic()
+    deadline = started + wait
+    last_status = None
+    last_error = None
+    while True:
+        remaining = deadline - time.monotonic()
+        try:
+            response = httpx.get(
+                f"{URL[target]}/readyz",
+                timeout=max(0.01, min(1.0, remaining)) if remaining > 0 else 0.01,
+            )
+            last_status = response.status_code
+            last_error = None
+            if response.status_code == 200:
+                waited = round(time.monotonic() - started, 3)
+                emit(
+                    step="4_wait_ready",
+                    target=target,
+                    ready=True,
+                    status_code=response.status_code,
+                    waited_s=waited,
+                )
+                break
+        except httpx.RequestError as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+
+        if time.monotonic() >= deadline:
+            waited = round(time.monotonic() - started, 3)
+            emit(
+                step="4_wait_ready",
+                target=target,
+                ready=False,
+                status_code=last_status,
+                error=last_error,
+                waited_s=waited,
+            )
+            return {
+                "ok": False,
+                "target": target,
+                "reason": "target did not become ready before timeout",
+                "waited_s": waited,
+                "rpo_seconds": rpo.get("rpo_seconds"),
+                "docs_lost": rpo.get("docs_lost"),
+            }
+        time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+
+    active_file = pathlib.Path("edge/active_region")
+    active_file.parent.mkdir(parents=True, exist_ok=True)
+    active_file.write_text(target + "\n", encoding="utf-8")
+    emit(step="5_dns_cutover", target=target, active_region=target)
+    return {
+        "ok": True,
+        "target": target,
+        "rpo_seconds": rpo.get("rpo_seconds"),
+        "docs_lost": rpo.get("docs_lost"),
+        "embed_model_version": restored.get("embed_model_version"),
+        "waited_s": waited,
+    }
 
 
 if __name__ == "__main__":

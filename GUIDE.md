@@ -233,6 +233,7 @@ python3 -m pytest tests/ -v
 | Manually editing `edge/active_region` | `measure_rto.py` flags it if `t_cutover < t_detect`, and `test_drill2_hop_le` rejects any warnings. Re-run the automated drill instead. |
 | Assuming warm-up starts at process boot | `serving/app.py` only starts the warm-up timer when `pool_state` changes *while running*. Don't patch `serving/` to dodge this. |
 | Confusing `netblock` with a dead process | In bare mode, `netblock` is `SIGSTOP` (process paused, not killed). Restore with `restore --region a --backend bare`. `stop` is the one that actually kills it (`SIGKILL`). |
+| Running bare `netblock` on Windows | Use `--mode stop` on Windows; bare `netblock` requires POSIX `SIGSTOP` and should run under Linux or Git Bash. |
 | Calling `failover.py` before any snapshot exists | Start `state/replicate.py` and wait for its first `put` — otherwise `state/snapshot.py get` fails at `2_restore_snapshot`. |
 | Using Docker mode for the graded drill | `--backend docker` works, but timing depends on your machine and Docker daemon — not reproducible. Grading always uses bare `--mock`. |
 

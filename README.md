@@ -73,5 +73,6 @@ scripts/    up_bare.sh / down_bare.sh — start/stop the stack without Docker.
 ## Safety Notes
 
 - Every target in this lab is `127.0.0.1` / `localhost`. Do not repoint `URL`, `UPSTREAM`, or the load generator at any external host.
-- `--mock` mode only sends process signals (`SIGSTOP`/`SIGKILL`) and touches local files — nothing here reaches a real cloud region.
+- `--mock` mode only affects local processes and files — nothing here reaches a real cloud region.
+- On Windows, bare `--mode stop` is supported; bare `--mode netblock` needs POSIX `SIGSTOP` and must be run from Linux or Git Bash.
 - The chaos script refuses to kill a region if the other one is already down, to prevent an accidental double outage. Overriding this (`--i-really-want-both`) marks the drill invalid for grading.

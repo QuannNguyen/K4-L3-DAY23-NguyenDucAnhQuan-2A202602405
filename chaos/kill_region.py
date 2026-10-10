@@ -77,6 +77,9 @@ def pid_of(region: str) -> int | None:
 
 def kill(region: str, mode: str, backend: str, force_both: bool, mock: bool):
     other = "b" if region == "a" else "a"
+    if backend == "bare" and os.name == "nt" and mode == "netblock":
+        raise SystemExit(
+            "netblock bare mode requires POSIX SIGSTOP; use --mode stop on Windows")
     other_alive = is_alive(other)
     if not other_alive and not force_both:
         event(action="refused", region=region, mode=mode,
@@ -93,10 +96,13 @@ def kill(region: str, mode: str, backend: str, force_both: bool, mock: bool):
         pid = pid_of(region)
         if pid is None:
             raise SystemExit(f"khong tim thay PID cua region-{region} trong {PID_DIR}")
-        # netblock: SIGSTOP -> TCP handshake vẫn xong nhưng không ai trả lời => request TREO
-        #           (đúng hành vi của iptables DROP ở tầng app)
-        # stop    : SIGKILL -> cổng đóng => ConnectError ngay
-        os.kill(pid, signal.SIGSTOP if mode == "netblock" else signal.SIGKILL)
+        if os.name == "nt":
+            os.kill(pid, signal.SIGTERM)
+        else:
+            # netblock: SIGSTOP -> TCP handshake vẫn xong nhưng không ai trả lời => request TREO
+            #           (đúng hành vi của iptables DROP ở tầng app)
+            # stop    : SIGKILL -> cổng đóng => ConnectError ngay
+            os.kill(pid, signal.SIGSTOP if mode == "netblock" else signal.SIGKILL)
     else:
         svc = f"serving-{region}"
         if mode == "stop":
